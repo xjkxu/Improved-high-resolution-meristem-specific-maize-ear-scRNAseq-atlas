@@ -1,0 +1,541 @@
+---
+title: "Maize_B73_late SPM_integration"
+output: html_document
+---
+
+## Load all packages
+```{r}
+
+library("rlang")
+library("Seurat");
+library("sctransform");
+library("dplyr");
+library("RColorBrewer");
+library("ggthemes");
+library("ggplot2");
+library("cowplot");
+library("data.table");
+library("scales")
+
+```
+
+
+## Set up Seurat object
+```{r}
+
+memory.limit(size=50000000)
+
+samples=c("xu44","xu46")
+
+data.10x = list()
+
+data.10x[[1]] <- Read10X(data.dir = "xu44_SPM/raw_feature_bc_matrix");
+
+data.10x[[2]] <- Read10X(data.dir = "xu46_SPM/raw_feature_bc_matrix");
+
+
+## Convert each feature-barcode matrix to a Seurat object.
+
+SPM.list = list(); 
+
+SPM.list[[1]] = CreateSeuratObject(counts = data.10x[[1]], min.cells=3, min.features=200, project=samples[1]);
+
+SPM.list[[1]][["DataSet"]] = samples[1];
+
+SPM.list[[2]] = CreateSeuratObject(counts = data.10x[[2]], min.cells=3, min.features=200, project=samples[2]);
+
+SPM.list[[2]][["DataSet"]] = samples[2];
+
+
+### Subset each library to filter low quality cells
+
+
+SPM.list[[1]] <- subset(SPM.list[[1]], subset = nCount_RNA > 5000 & nFeature_RNA > 1000 & nCount_RNA < 150000 & nFeature_RNA < 15000)
+
+SPM.list[[2]] <- subset(SPM.list[[2]], subset = nCount_RNA > 5000 & nFeature_RNA > 1000 & nCount_RNA < 150000 & nFeature_RNA < 15000)
+
+
+## logNormalize
+
+SPM.list[[1]]<- NormalizeData(SPM.list[[1]], normalization.method = "LogNormalize", scale.factor = 10000)
+
+SPM.list[[2]]<- NormalizeData(SPM.list[[2]], normalization.method = "LogNormalize", scale.factor = 10000)
+
+
+## Find variables
+
+
+SPM.list[[1]]<- FindVariableFeatures(SPM.list[[1]], selection.method = "vst", nfeatures = 2000)
+
+SPM.list[[2]]<- FindVariableFeatures(SPM.list[[2]], selection.method = "vst", nfeatures = 2000)
+
+
+
+## Select features that are repeatedly variable across datasets for integration
+
+
+features <- SelectIntegrationFeatures(object.list = SPM.list)
+
+
+## find anchors
+
+anchors <- FindIntegrationAnchors(object.list = SPM.list, anchor.features = features)
+
+
+## Integrate data
+
+SPM.int <- IntegrateData(anchorset = anchors)
+
+
+DefaultAssay(SPM.int)<-"integrated"
+
+
+# Run the standard workflow for visualization and clustering
+SPM.int <- ScaleData(SPM.int, verbose = FALSE)
+SPM.int <- RunPCA(SPM.int, npcs = 30, verbose = FALSE)
+
+## Determine the ‘dimensionality’ of the dataset
+
+ElbowPlot(SPM.int, ndims = 40)
+
+## Elbow plot: quantitative approach
+## https://hbctraining.github.io/scRNA-seq/lessons/elbow_plot_metric.html
+
+## Calculate the first metric:
+## Determine percent of variation associated with each PC
+pct <- SPM.int[["pca"]]@stdev / sum(SPM.int[["pca"]]@stdev) * 100
+
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+
+co1
+
+
+# Determine the difference between variation of PC and subsequent PC
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+
+# last point where change of % of variation is more than 0.1%.
+co2
+
+# Minimum of the two calculation
+pcs <- min(co1, co2)
+
+pcs
+
+```
+
+
+
+```{r}
+SPM.int <- RunUMAP(SPM.int, reduction = "pca", dims = 1:pcs) ## Use PC number based on above Elbow plot: quantitative approach
+
+SPM.int <- FindNeighbors(SPM.int, reduction = "pca", dims = 1:pcs)
+
+SPM.int <- FindClusters(SPM.int, resolution = 0.8)
+
+# Visualization
+
+DimPlot(SPM.int, reduction = "umap", label = TRUE, pt.size = 1)
+DimPlot(SPM.int, reduction = "umap", group.by = "orig.ident")
+
+## two plots next to each other 
+
+p1 <- DimPlot(SPM.int, reduction = "umap", group.by = "orig.ident", pt.size = 1)
+p2 <- DimPlot(SPM.int, reduction = "umap", label = TRUE, repel = TRUE, pt.size = 1, label.size = 10)
+p1 + p2
+
+### split the UMAPs by samples 
+
+DimPlot(SPM.int, reduction = "umap", split.by = "orig.ident", pt.size = 1)
+
+
+### group the UMAPs by samples. 
+
+DimPlot(SPM.int, reduction = "umap", group.by = "orig.ident", pt.size = 1)
+
+
+## Remove cluster with low UMI or doublet
+
+SPM.int_rmDB <- subset(SPM.int, idents = 1, invert = TRUE)
+
+DimPlot(SPM.int_rmDB, reduction = "umap", label = TRUE, pt.size = 1)
+
+
+### split the integrated object to re-normalize and process
+
+SPM_int.rmDB.recluster.list <- SplitObject(SPM.int_rmDB, split.by = "orig.ident")
+
+SPM_int.rmDB.recluster.list
+
+
+## set RNA assay before normalization and processing 
+
+DefaultAssay(SPM_int.rmDB.recluster.list[[1]]) <- "RNA"
+DefaultAssay(SPM_int.rmDB.recluster.list[[2]]) <- "RNA"
+
+
+## logNormalize
+
+SPM_int.rmDB.recluster.list[[1]]<- NormalizeData(SPM_int.rmDB.recluster.list[[1]], normalization.method = "LogNormalize", scale.factor = 10000)
+
+SPM_int.rmDB.recluster.list[[2]]<- NormalizeData(SPM_int.rmDB.recluster.list[[2]], normalization.method = "LogNormalize", scale.factor = 10000)
+
+
+## Find variables
+
+
+SPM_int.rmDB.recluster.list[[1]]<- FindVariableFeatures(SPM_int.rmDB.recluster.list[[1]], selection.method = "vst", nfeatures = 2000)
+
+SPM_int.rmDB.recluster.list[[2]]<- FindVariableFeatures(SPM_int.rmDB.recluster.list[[2]], selection.method = "vst", nfeatures = 2000)
+
+
+
+# select features that are repeatedly variable across datasets for integration
+
+
+features <- SelectIntegrationFeatures(object.list = SPM_int.rmDB.recluster.list)
+
+
+# find anchors
+
+anchors <- FindIntegrationAnchors(object.list = SPM_int.rmDB.recluster.list, anchor.features = features)
+
+
+# Integrate data
+# this command creates an 'integrated' data assay
+
+SPM_int.rmDB.recluster.int <- IntegrateData(anchorset = anchors)
+
+
+DefaultAssay(SPM_int.rmDB.recluster.int)<-"integrated"
+
+
+# Run the standard workflow for visualization and clustering
+SPM_int.rmDB.recluster.int <- ScaleData(SPM_int.rmDB.recluster.int, verbose = FALSE)
+SPM_int.rmDB.recluster.int <- RunPCA(SPM_int.rmDB.recluster.int, npcs = 30, verbose = FALSE)
+
+
+```
+
+
+
+```{r}
+## Determine the ‘dimensionality’ of the dataset
+
+ElbowPlot(SPM_int.rmDB.recluster.int, ndims = 40)
+
+## Elbow plot: quantitative approach
+## https://hbctraining.github.io/scRNA-seq/lessons/elbow_plot_metric.html
+
+
+# Determine percent of variation associated with each PC
+pct <- SPM_int.rmDB.recluster.int[["pca"]]@stdev / sum(SPM_int.rmDB.recluster.int[["pca"]]@stdev) * 100
+
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+
+co1
+
+# Determine the difference between variation of PC and subsequent PC
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+
+# last point where change of % of variation is more than 0.1%.
+co2
+
+
+# Minimum of the two calculation
+pcs <- min(co1, co2)
+
+pcs
+
+```
+
+
+
+```{r}
+SPM_int.rmDB.recluster.int <- RunUMAP(SPM_int.rmDB.recluster.int, reduction = "pca", dims = 1:pcs) ## PC number based on above Elbow plot: quantitative approach
+
+SPM_int.rmDB.recluster.int <- FindNeighbors(SPM_int.rmDB.recluster.int, reduction = "pca", dims = 1:pcs)
+
+SPM_int.rmDB.recluster.int <- FindClusters(SPM_int.rmDB.recluster.int, resolution = 0.65)
+
+# Visualization
+
+DimPlot(SPM_int.rmDB.recluster.int, reduction = "umap", label = TRUE, pt.size = 1)
+
+DimPlot(SPM_int.rmDB.recluster.int, reduction = "umap", group.by = "orig.ident")
+
+## two plots next to each other 
+
+p1 <- DimPlot(SPM_int.rmDB.recluster.int, reduction = "umap", group.by = "orig.ident", pt.size = 1)
+p2 <- DimPlot(SPM_int.rmDB.recluster.int, reduction = "umap", label = TRUE, label.size = 10, pt.size = 1, repel = TRUE)
+p1 + p2
+
+### split the UMAPs by samples 
+
+DimPlot(SPM_int.rmDB.recluster.int, reduction = "umap", split.by = "orig.ident", pt.size = 1)
+
+
+### group the UMAPs by samples. 
+
+DimPlot(SPM_int.rmDB.recluster.int, reduction = "umap", group.by = "orig.ident", pt.size = 1)
+
+```
+
+```{r}
+## save 
+
+saveRDS(SPM_int.rmDB.recluster.int, file = "SPM_int.rmDB.recluster.int.rds")
+
+```
+
+
+
+```{r}
+### re-cluster vasculature.Sphase cells. 
+
+subcluster.vasculature.Sphase <- subset(SPM_int.rmDB.recluster.int, idents = c("0"))
+
+DefaultAssay(subcluster.vasculature.Sphase)<-"integrated"
+
+subcluster.vasculature.Sphase <- ScaleData(subcluster.vasculature.Sphase, verbose = FALSE)
+
+subcluster.vasculature.Sphase <- RunPCA(subcluster.vasculature.Sphase, npcs = 30, verbose = FALSE)
+
+
+ElbowPlot(subcluster.vasculature.Sphase, ndims = 40)
+
+## Elbow plot: quantitative approach
+## https://hbctraining.github.io/scRNA-seq/lessons/elbow_plot_metric.html
+
+# Determine percent of variation associated with each PC
+pct <- subcluster.vasculature.Sphase[["pca"]]@stdev / sum(subcluster.vasculature.Sphase[["pca"]]@stdev) * 100
+
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+
+co1
+
+# Determine the difference between variation of PC and subsequent PC
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+
+# last point where change of % of variation is more than 0.1%.
+co2
+
+# Minimum of the two calculation
+pcs <- min(co1, co2)
+
+pcs
+
+DefaultAssay(subcluster.vasculature.Sphase) <- "integrated"
+
+
+subcluster.vasculature.Sphase <- RunUMAP(subcluster.vasculature.Sphase, reduction = "pca", dims = 1:pcs) ## Use PC number based on above Elbow plot: quantitative approach
+
+subcluster.vasculature.Sphase <- FindNeighbors(subcluster.vasculature.Sphase, reduction = "pca", dims = 1:17)
+
+subcluster.vasculature.Sphase <- FindClusters(subcluster.vasculature.Sphase, resolution = 0.1)
+
+# Visualization
+
+DimPlot(subcluster.vasculature.Sphase, reduction = "umap", label = TRUE, pt.size = 1)
+DimPlot(subcluster.vasculature.Sphase, reduction = "umap", group.by = "orig.ident")
+
+## two plots next to each other 
+
+p1 <- DimPlot(subcluster.vasculature.Sphase, reduction = "umap", group.by = "orig.ident", pt.size = 1)
+p2 <- DimPlot(subcluster.vasculature.Sphase, reduction = "umap", label = TRUE, repel = TRUE, pt.size = 1, label.size = 10)
+p1 + p2
+
+saveRDS(subcluster.vasculature.Sphase, file = "subcluster.vasculature.Sphase.rds")
+
+SPM.int.subcluster2 <- SPM_int.rmDB.recluster.int
+
+SPM.int.subcluster2$vasculature_Sphase_subclusters <- as.character(Idents(SPM.int.subcluster2))
+
+SPM.int.subcluster2$vasculature_Sphase_subclusters[Cells(subcluster.vasculature.Sphase)] <- paste(Idents(subcluster.vasculature.Sphase))
+
+
+DimPlot(SPM.int.subcluster2, reduction = "umap", group.by = "vasculature_Sphase_subclusters", label = TRUE)
+
+Idents(SPM.int.subcluster2) <- "vasculature_Sphase_subclusters"
+
+
+p1 <- DimPlot(SPM.int.subcluster2, reduction = "umap", group.by = "orig.ident", pt.size = 1)
+p2 <- DimPlot(SPM.int.subcluster2, reduction = "umap", label = TRUE, repel = TRUE, pt.size = 1, label.size = 5)
+p1 + p2
+
+
+DimPlot(SPM.int.subcluster2, reduction = "umap",pt.size = 1)
+
+
+saveRDS(SPM.int.subcluster2, file = "SPM.subcluster2.Sphase.vasculature.rds")
+
+
+```
+
+
+
+```{r}
+### re-cluster pith and cortex cells. 
+
+subcluster.cortex.pith <- subset(SPM.int.subcluster2, idents = c("1"))
+
+DefaultAssay(subcluster.cortex.pith)<-"integrated"
+
+subcluster.cortex.pith <- ScaleData(subcluster.cortex.pith, verbose = FALSE)
+
+subcluster.cortex.pith <- RunPCA(subcluster.cortex.pith, npcs = 30, verbose = FALSE)
+
+
+ElbowPlot(subcluster.cortex.pith, ndims = 40)
+
+## Elbow plot: quantitative approach
+## https://hbctraining.github.io/scRNA-seq/lessons/elbow_plot_metric.html
+
+# Determine percent of variation associated with each PC
+pct <- subcluster.cortex.pith[["pca"]]@stdev / sum(subcluster.cortex.pith[["pca"]]@stdev) * 100
+
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+
+co1
+
+# Determine the difference between variation of PC and subsequent PC
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+
+# last point where change of % of variation is more than 0.1%.
+co2
+
+
+# Minimum of the two calculation
+pcs <- min(co1, co2)
+
+pcs
+
+subcluster.cortex.pith <- RunUMAP(subcluster.cortex.pith, reduction = "pca", dims = 1:20) ## Use default 30, or change the PC number based on above Elbow plot: quantitative approach
+
+subcluster.cortex.pith <- FindNeighbors(subcluster.cortex.pith, reduction = "pca", dims = 1:20)
+
+subcluster.cortex.pith <- FindClusters(subcluster.cortex.pith, resolution = 0.1)
+
+# Visualization
+
+DimPlot(subcluster.cortex.pith, reduction = "umap", label = TRUE, pt.size = 1)
+DimPlot(subcluster.cortex.pith, reduction = "umap", group.by = "orig.ident")
+
+## two plots next to each other 
+
+p1 <- DimPlot(subcluster.cortex.pith, reduction = "umap", group.by = "orig.ident", pt.size = 1)
+p2 <- DimPlot(subcluster.cortex.pith, reduction = "umap", label = TRUE, repel = TRUE, pt.size = 1, label.size = 10)
+p1 + p2
+
+
+subcluster.cortex.pith <- RenameIdents(object = subcluster.cortex.pith, '0' = 'Pith', "1" = "Cortex")
+
+p1 <- DimPlot(subcluster.cortex.pith, reduction = "umap", group.by = "orig.ident", pt.size = 1)
+p2 <- DimPlot(subcluster.cortex.pith, reduction = "umap", label = TRUE, repel = TRUE, pt.size = 1, label.size = 10)
+p1 + p2
+
+saveRDS(subcluster.cortex.pith, file = "subcluster.cortex.pith.rds")
+
+
+SPM.int.subcluster3 <- SPM.int.subcluster2
+
+SPM.int.subcluster3$vasculature_Sphase_cortex_pith_subclusters <- as.character(Idents(SPM.int.subcluster3))
+
+SPM.int.subcluster3$vasculature_Sphase_cortex_pith_subclusters[Cells(subcluster.cortex.pith)] <- paste(Idents(subcluster.cortex.pith))
+
+
+DimPlot(SPM.int.subcluster3, reduction = "umap", group.by = "vasculature_Sphase_cortex_pith_subclusters", label = TRUE)
+
+Idents(SPM.int.subcluster3) <- "vasculature_Sphase_cortex_pith_subclusters"
+
+
+p1 <- DimPlot(SPM.int.subcluster3, reduction = "umap", group.by = "orig.ident", pt.size = 1)
+p2 <- DimPlot(SPM.int.subcluster3, reduction = "umap", label = TRUE, repel = TRUE, pt.size = 1, label.size = 5)
+p1 + p2
+
+
+DimPlot(SPM.int.subcluster3, reduction = "umap",pt.size = 1)
+
+
+saveRDS(SPM.int.subcluster3, file = "SPM.subcluster.final.rds")
+
+```
+
+
+```{r}
+
+## cluster labels
+
+SPM.int.subcluster3.annotate <- RenameIdents(object = SPM.int.subcluster3, '2' = 'Meristem.Epidermis', '3' = 'Meristem.Base', '4' = 'Meristem.Tip.(stem.cell)', '5' = 'Determinate.Lateral.Organ.(non.epi)', '6' = 'G2.M.Phase.(non.epi.I)', '7' = 'Adaxial.Meristem.Periphery.(non.epi)' , '8' = 'Stem.epidermis', '10' = 'Determinate.Lateral.Organ.(epi)', '9' = 'TBD(exp.FCP1.but.not.CLE7)', '13' = 'G2.M.Phase.(non.epi.II)', '12' = 'S.Phase.(epi)', '11' = 'G2.M.Phase.(epi)', '14' = 'TBD.I', '15' ='TBD.II')
+
+
+
+## change cluster colors
+
+DimPlot(SPM.int.subcluster3.annotate, reduction = "umap", label = TRUE, label.size = 5, pt.size = 1, cols = c("Cortex"="#afbca5","Pith"="#99b6ca","S.Phase.(non.epi)"="#95511f","G2.M.Phase.(non.epi.II)"="#e761d8","Determinate.Lateral.Organ.(epi)"="#98fb98","Meristem.Epidermis"="#66dcf6","Meristem.Tip.(stem.cell)"="#e93f33","Determinate.Lateral.Organ.(non.epi)"="#64ac4e","Meristem.Base"="#f3f550","G2.M.Phase.(non.epi.I)"="#737172","S.Phase.(epi)"="#e9967a","G2.M.Phase.(epi)"="#808000","Adaxial.Meristem.Periphery.(non.epi)"="#4d6dcb","Vasculature"="#ffa500", "TBD(exp.FCP1.but.not.CLE7)" = "#F68282", "TBD.I" = "#F8766D", "TBD.II" = "#D4D915","Stem.epidermis"="#B95FBB"))
+
+
+saveRDS(SPM.int.subcluster3.annotate, file = "SPM.final.rds")
+
+
+SPM.int.subcluster3.annotate <- readRDS(file = "SPM.final.rds")
+
+```
+
+
+```{r}
+
+library(Seurat)
+
+## 1) load the already-annotated object
+SPM.final <- readRDS("SPM.final.rds")
+
+## 2) final cluster colors
+cluster.colors <- c(
+  "Cortex"="#afbca5","Pith"="#99b6ca","S.Phase.(non.epi)"="#95511f",
+  "G2.M.Phase.(non.epi.II)"="#e761d8","Determinate.Lateral.Organ.(epi)"="#98fb98",
+  "Meristem.Epidermis"="#66dcf6","Meristem.Tip.(stem.cell)"="#e93f33",
+  "Determinate.Lateral.Organ.(non.epi)"="#64ac4e","Meristem.Base"="#f3f550",
+  "G2.M.Phase.(non.epi.I)"="#737172","S.Phase.(epi)"="#e9967a",
+  "G2.M.Phase.(epi)"="#808000","Adaxial.Meristem.Periphery.(non.epi)"="#4d6dcb",
+  "Vasculature"="#ffa500","TBD(exp.FCP1.but.not.CLE7)"="#F68282",
+  "TBD.I"="#F8766D","TBD.II"="#D4D915","Stem.epidermis"="#B95FBB")
+
+## 3) check that the saved identities match the color names
+cur <- as.character(Idents(SPM.final))
+print(table(cur))
+missing <- setdiff(unique(cur), names(cluster.colors))
+if (length(missing) > 0) stop("These labels have no color: ", paste(missing, collapse = ", "))
+
+## 4) set identity levels in color order
+Idents(SPM.final) <- factor(cur, levels = names(cluster.colors)[names(cluster.colors) %in% cur])
+
+## 5) store labels, per-cell colors, and the palette in the object
+SPM.final$final_annotation <- as.character(Idents(SPM.final))
+SPM.final$final_color <- unname(cluster.colors[SPM.final$final_annotation])
+SPM.final@misc$cluster_colors <- cluster.colors
+
+## 6) check the plot, then save under a new name
+DimPlot(SPM.final, reduction = "umap", label = TRUE, label.size = 5, pt.size = 1,
+        cols = SPM.final@misc$cluster_colors)
+
+saveRDS(SPM.final, file = "SPM.final.updated.color.rds")
+
+
+```
+

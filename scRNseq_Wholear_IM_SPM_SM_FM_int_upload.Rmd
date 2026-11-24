@@ -1,0 +1,110 @@
+---
+title: "Wholeear_IM_SPM_SM_FM_int_SeuratV5"
+---
+
+```{r}
+# -------------------------------
+# Load Required Libraries
+# -------------------------------
+library(Seurat)
+library(SeuratData)
+library(SeuratWrappers)
+library(ggplot2)
+library(patchwork)
+library(scCustomize)   # <-- Required for Convert_Assay()
+
+
+options(future.globals.maxSize = 50 * 1024^3)  # 50 GB
+
+library(future)
+plan("sequential")  
+# plan("multisession", workers = 4) # Optional: Speed up large integrations
+
+# -------------------------------
+# 1. Load and Convert All Seurat V4 RDS Files to V5 Assay Format
+# -------------------------------
+
+# Load and convert IM
+IM <- readRDS("IM.earlySPM.final.updated.color.rds") # from Xu et al.,2025 Developmental Cell
+DefaultAssay(IM) <- "RNA"
+IM <- Convert_Assay(seurat_object = IM, convert_to = "V5")
+IM@meta.data$source <- "IM"
+
+# Load and convert SPM
+SPM <- readRDS("SPM.final.updated.color.rds") # from this study
+DefaultAssay(SPM) <- "RNA"
+SPM <- Convert_Assay(seurat_object = SPM, convert_to = "V5")
+SPM@meta.data$source <- "SPM"
+
+# Load and convert SM
+SM <- readRDS("SM.final.updated.color.rds") # from this study
+DefaultAssay(SM) <- "RNA"
+SM <- Convert_Assay(seurat_object = SM, convert_to = "V5")
+SM@meta.data$source <- "SM"
+
+# Load and convert FM
+FM <- readRDS("FM.final.updated.color.rds") # from this study
+DefaultAssay(FM) <- "RNA"
+FM <- Convert_Assay(seurat_object = FM, convert_to = "V5")
+FM@meta.data$source <- "FM"
+
+# Load and convert Whole Ear
+whole <- readRDS("whole.ear.final.updated.color.rds") # from this study
+DefaultAssay(whole) <- "RNA"
+whole <- Convert_Assay(seurat_object = whole, convert_to = "V5")
+whole@meta.data$source <- "WholeEar"
+
+# -------------------------------
+# 2. Merge All Samples into One Object
+# -------------------------------
+All.merge <- merge(x = IM, y = list(SPM, SM, FM, whole))
+View(All.merge@meta.data)
+
+# -------------------------------
+# 3. Preprocessing: Normalize, Find Variable Features, Scale, PCA
+# -------------------------------
+All.merge <- NormalizeData(All.merge)
+All.merge <- FindVariableFeatures(All.merge, nfeatures = 3000)
+All.merge <- ScaleData(All.merge)
+All.merge <- RunPCA(All.merge, npcs = 50)
+
+# -------------------------------
+# 4. Integrate Using RPCA in Seurat V5
+# -------------------------------
+All.merge <- IntegrateLayers(
+  object = All.merge,
+  method = RPCAIntegration,
+  orig.reduction = "pca",
+  new.reduction = "integrated.rpca",
+  verbose = FALSE
+)
+
+# -------------------------------
+# 5. Clustering and UMAP
+# -------------------------------
+All.merge <- FindNeighbors(All.merge, dims = 1:35, reduction = "integrated.rpca")
+All.merge <- FindClusters(All.merge, resolution = 1, cluster.name = "rpca_clusters")
+All.merge <- RunUMAP(All.merge, dims = 1:35, reduction = "integrated.rpca", reduction.name = "umap.rpca")
+
+# -------------------------------
+# 6. Metadata Inspection and Visualization
+# -------------------------------
+View(All.merge@meta.data)
+
+# Visualizations
+p1 <- DimPlot(All.merge, reduction = "umap.rpca", label = TRUE, pt.size = 1, label.size = 8)
+p2 <- DimPlot(All.merge, reduction = "umap.rpca", group.by = "orig.ident", pt.size = 1)
+p3 <- DimPlot(All.merge, reduction = "umap.rpca", group.by = "source", pt.size = 1)
+p1 + p2 + p3
+
+# Split UMAP by sample or source
+DimPlot(All.merge, reduction = "umap.rpca", split.by = "orig.ident", pt.size = 1.5, label = TRUE, label.size = 8)
+DimPlot(All.merge, reduction = "umap.rpca", split.by = "source", pt.size = 1.5, label = TRUE, label.size = 8)
+
+# -------------------------------
+# 7. Save Final Integrated Object
+# -------------------------------
+saveRDS(All.merge, file = "IM_SPM_SM_FM_WholeEar_RPCAint_PC35_res1.rds")
+
+```
+
